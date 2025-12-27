@@ -66,11 +66,17 @@ class ReachyMini:
         
     def enable_gravity_compensation(self):
         try:
-            # Assuming standard API endpoint or similar
-            # Reachy SDK using Placo often exposes this via a specific call
-            # We'll try the dedicated endpoint
             requests.post(f"{self.base_url}/api/gravity_compensation", json={"enable": True}, timeout=1)
         except: pass
+
+    def get_joints(self):
+        """Fetch full robot state."""
+        try:
+            resp = requests.get(f"{self.base_url}/api/state/full", timeout=0.2)
+            if resp.status_code == 200:
+                return resp.json()
+        except: pass
+        return {}
 
 def create_head_pose(x=0, y=0, z=0, roll=0, pitch=0, yaw=0, mm=False):
     """

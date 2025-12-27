@@ -30,8 +30,10 @@ app.mount("/static", StaticFiles(directory="static"), name="static")
 robot = RobotController()
 detector = DetectionEngine() # Now uses YOLOv8 (Output is list of dicts)
 current_status = "System Initializing..."
-SERVER_STATE = {"paused": True} # Default Paused
-LATEST_CANDIDATES = []
+SERVER_STATE = {
+    "paused": True, 
+    "wiggle_enabled": True
+} # Default Paused, Wiggle ON
 LATEST_CANDIDATES = []
 
 # State
@@ -371,9 +373,10 @@ def video_stream_loop():
             d_pitch = err_y * np.deg2rad(FOV_Y) * GAIN_PITCH
             
             # Wiggle
-            if not target_present or (current_time - last_detection_time > 5.0):
-                threading.Thread(target=robot.wiggle_antennas, daemon=True).start()
-                last_detection_time = current_time
+            if SERVER_STATE["wiggle_enabled"]:
+                if not target_present or (current_time - last_detection_time > 5.0):
+                    threading.Thread(target=robot.wiggle_antennas, daemon=True).start()
+                    last_detection_time = current_time
             target_present = True
             
             # Move
@@ -473,6 +476,7 @@ def get_status():
     return {
         "status": current_status,
         "paused": SERVER_STATE["paused"],
+        "wiggle_enabled": SERVER_STATE["wiggle_enabled"],
         "candidates": LATEST_CANDIDATES,
         "pose": {
              "head_yaw": robot.current_yaw, # We might need to expose these from robot controller
@@ -493,6 +497,11 @@ def api_reset():
 def toggle_pause():
     SERVER_STATE["paused"] = not SERVER_STATE["paused"]
     return {"status": "ok", "paused": SERVER_STATE["paused"]}
+
+@app.post("/api/toggle_wiggle")
+def toggle_wiggle():
+    SERVER_STATE["wiggle_enabled"] = not SERVER_STATE["wiggle_enabled"]
+    return {"status": "ok", "wiggle_enabled": SERVER_STATE["wiggle_enabled"]}
 
 from pydantic import BaseModel
 

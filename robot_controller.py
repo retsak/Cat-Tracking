@@ -19,6 +19,10 @@ class RobotController:
         self._worker_thread = threading.Thread(target=self._command_worker, daemon=True)
         self._worker_thread.start()
         
+        # State Monitor Worker
+        self._state_thread = threading.Thread(target=self._state_worker, daemon=True)
+        self._state_thread.start()
+        
         # Camera State
         self._latest_camera_frame = None
         self._camera_lock = threading.Lock()
@@ -340,9 +344,43 @@ class RobotController:
         except Exception as e:
             print(f"Set Pose Error: {e}")
 
+    def _state_worker(self):
+        """Periodically fetch robot state to keep UI in sync."""
+        while True:
+            if self._is_connected_to_api:
+                self.update_head_pose()
+            time.sleep(0.1)
+
     def update_head_pose(self):
-        """Fetch current head pose from API (Stubbed)."""
-        pass
+        """Fetch current head pose from API using /api/state/full."""
+        if not self.base_url: return
+        try:
+             with ReachyMini(self.host) as mini:
+                 state = mini.get_joints()
+                 if not state: return
+                 
+                 # Structure: {'head_pose': {'x':..., 'roll':...}, 'body_yaw': float, 'antennas_position': [l, r]}
+                 
+                 # Head (Radians)
+                 if "head_pose" in state and state["head_pose"]:
+                     hp = state["head_pose"]
+                     self.current_pitch = float(hp.get("pitch", self.current_pitch))
+                     self.current_roll = float(hp.get("roll", self.current_roll))
+                     self.current_yaw = float(hp.get("yaw", self.current_yaw))
+                 
+                 # Body (Radians)
+                 if "body_yaw" in state and state["body_yaw"] is not None:
+                     self.current_body_yaw = float(state["body_yaw"])
+
+                 # Antennas (Convert Rad -> Deg)
+                 if "antennas_position" in state and state["antennas_position"]:
+                     ants = state["antennas_position"]
+                     if len(ants) >= 2:
+                         self.current_antenna_left = np.rad2deg(float(ants[0]))
+                         self.current_antenna_right = np.rad2deg(float(ants[1]))
+                 
+        except Exception:
+            pass
 
     def recenter_head(self):
         self.command_queue.put((self._recenter_head_sync, ()))

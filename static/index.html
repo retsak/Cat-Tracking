@@ -40,6 +40,10 @@
                         style="cursor: pointer; margin-left: 10px; background: rgba(255, 165, 0, 0.2); border: 1px solid rgba(255, 165, 0, 0.4);">
                         Pause
                     </button>
+                    <button id="wiggle-btn" class="status-pill"
+                        style="cursor: pointer; margin-left: 10px; background: rgba(147, 51, 234, 0.2); border: 1px solid rgba(147, 51, 234, 0.4);">
+                        Wiggle: On
+                    </button>
                 </div>
             </div>
 
@@ -154,6 +158,15 @@
             }
         });
 
+        document.getElementById('wiggle-btn').addEventListener('click', async () => {
+            try {
+                const res = await fetch('/api/toggle_wiggle', { method: 'POST' });
+                // State update happens in polling
+            } catch (e) {
+                console.error("Wiggle toggle failed", e);
+            }
+        });
+
         // Manual Control Logic
         const sliders = ['ant-l', 'ant-r', 'head-y', 'head-p', 'head-r', 'body-y'];
         const activeSliders = new Set(); // Track which sliders are being used
@@ -226,6 +239,18 @@
                         btn.style.background = "rgba(255, 165, 0, 0.2)";
                         btn.style.borderColor = "rgba(255, 165, 0, 0.4)";
                         controls.style.display = 'none';
+                    }
+                }
+
+                // Sync Wiggle State
+                if (data.wiggle_enabled !== undefined) {
+                    const btn = document.getElementById('wiggle-btn');
+                    if (data.wiggle_enabled) {
+                        btn.innerText = "Wiggle: On";
+                        btn.style.opacity = "1.0";
+                    } else {
+                        btn.innerText = "Wiggle: Off";
+                        btn.style.opacity = "0.5";
                     }
                 }
 
