@@ -242,11 +242,25 @@ class RobotController:
             target_body_yaw = new_body_yaw
             target_head_yaw = new_head_yaw
 
-            # Clamp limits
-            target_head_yaw = np.clip(target_head_yaw, -1.0, 1.0)     # Head limits
-            target_pitch = np.clip(target_pitch, -0.8, 0.2)
-            target_body_yaw = np.clip(target_body_yaw, -2.5, 2.5)
-    
+            # Constants for Safety Limits (converted to radians)
+            MAX_HEAD_PITCH = np.deg2rad(40.0)
+            MAX_HEAD_YAW = np.deg2rad(180.0)
+            MAX_BODY_YAW = np.deg2rad(160.0)
+            MAX_YAW_DELTA = np.deg2rad(65.0)
+
+            # Clamp Body First (Absolute Limit)
+            target_body_yaw = np.clip(target_body_yaw, -MAX_BODY_YAW, MAX_BODY_YAW)
+            
+            # Clamp Head Absolute Limits
+            target_head_yaw = np.clip(target_head_yaw, -MAX_HEAD_YAW, MAX_HEAD_YAW)
+            target_pitch = np.clip(target_pitch, -MAX_HEAD_PITCH, MAX_HEAD_PITCH)
+            
+            # Clamp Head Relative to Body (Mechanical Constraint)
+            # Head Yaw must be within [BodyYaw - 65deg, BodyYaw + 65deg]
+            min_head_limit = target_body_yaw - MAX_YAW_DELTA
+            max_head_limit = target_body_yaw + MAX_YAW_DELTA
+            target_head_yaw = np.clip(target_head_yaw, min_head_limit, max_head_limit)
+
             # USE NEW SDK SHIM
             with ReachyMini(self.host) as mini:
                 # DEBUG LOGGING (User Requested)
@@ -286,12 +300,29 @@ class RobotController:
             
         try:
              # Update internal state
-            self.current_yaw = h_yaw
-            self.current_pitch = h_pitch
             self.current_roll = h_roll
             self.current_body_yaw = b_yaw
             self.current_antenna_left = a_left
             self.current_antenna_right = a_right
+            
+            # --- SAFETY CLAMPS ---
+            MAX_HEAD_PITCH = np.deg2rad(40.0)
+            MAX_HEAD_ROLL = np.deg2rad(40.0)
+            MAX_HEAD_YAW = np.deg2rad(180.0)
+            MAX_BODY_YAW = np.deg2rad(160.0)
+            MAX_YAW_DELTA = np.deg2rad(65.0)
+            
+            # Clamp Absolute
+            b_yaw = np.clip(b_yaw, -MAX_BODY_YAW, MAX_BODY_YAW)
+            h_yaw = np.clip(h_yaw, -MAX_HEAD_YAW, MAX_HEAD_YAW)
+            h_pitch = np.clip(h_pitch, -MAX_HEAD_PITCH, MAX_HEAD_PITCH)
+            h_roll = np.clip(h_roll, -MAX_HEAD_ROLL, MAX_HEAD_ROLL)
+            
+            # Clamp Relative (Head vs Body)
+            min_head = b_yaw - MAX_YAW_DELTA
+            max_head = b_yaw + MAX_YAW_DELTA
+            h_yaw = np.clip(h_yaw, min_head, max_head)
+            # ---------------------
              
             with ReachyMini(self.host) as mini:
                 mini.goto_target(
@@ -378,3 +409,22 @@ class RobotController:
                 }, timeout=1)
             except:
                 pass
+
+    def set_motor_mode(self, mode):
+        """
+        mode: 'stiff', 'limp', 'soft'
+        """
+        self.command_queue.put((self._set_motor_mode_sync, (mode,)))
+
+    def _set_motor_mode_sync(self, mode):
+        if not self.base_url: return
+        try:
+            with ReachyMini(self.host) as mini:
+                if mode == 'stiff':
+                    mini.enable_motors()
+                elif mode == 'limp':
+                    mini.disable_motors()
+                elif mode == 'soft':
+                    mini.enable_gravity_compensation()
+        except Exception as e:
+            print(f"Motor Mode Error: {e}")

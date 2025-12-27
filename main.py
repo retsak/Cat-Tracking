@@ -30,7 +30,9 @@ app.mount("/static", StaticFiles(directory="static"), name="static")
 robot = RobotController()
 detector = DetectionEngine() # Now uses YOLOv8 (Output is list of dicts)
 current_status = "System Initializing..."
-SERVER_STATE = {"paused": False}
+SERVER_STATE = {"paused": True} # Default Paused
+LATEST_CANDIDATES = []
+LATEST_CANDIDATES = []
 
 # State
 latest_frame = None
@@ -164,7 +166,9 @@ def video_stream_loop():
 
             best_id = None
             best_score = -1.0
+            current_target_score = -1.0
             debug_candidates = []
+            current_frame_candidates = []
             
             for obj_id, obj in trackable_objects.items():
                 box, label, conf = obj['data']
@@ -224,17 +228,34 @@ def video_stream_loop():
                 score += size_bonus
                 
                 # D. Stickiness (REMOVED - Using explicit threshold logic instead)
-                # stick_bonus = 0.0
-                # if current_target_id is not None and obj_id == current_target_id:
-                #     stick_bonus = 60.0
-                #     score += stick_bonus
+                # Capture Score of Current Target if present
+                if current_target_id is not None and obj_id == current_target_id:
+                    current_target_score = score
                 
-                debug_info = f"ID{obj_id}({label}) S:{score:.0f} [P:{prio_score} Ctx:{context_score} Cnf:{conf_bonus:.0f} Cnt:{cent_bonus:.0f} Sz:{size_bonus:.0f}]"
-                debug_candidates.append(debug_info)
+                # Structured Data for UI
+                cand_data = {
+                    "id": obj_id,
+                    "label": label,
+                    "score": int(score),
+                    "priority": int(prio_score),
+                    "context": int(context_score),
+                    "confidence": int(conf_bonus),
+                    "centrality": int(cent_bonus),
+                    "size": int(size_bonus)
+                }
+                # debug_candidates.append(cand_data) <-- REMOVED caused TypeError
+                current_frame_candidates.append(cand_data)
+
+                debug_string = f"ID{obj_id}({label}) S:{score:.0f} [P:{prio_score} Ctx:{context_score} Cnf:{conf_bonus:.0f} Cnt:{cent_bonus:.0f} Sz:{size_bonus:.0f}]"
+                debug_candidates.append(debug_string)
 
                 if score > best_score:
                     best_score = score
                     best_id = obj_id
+            
+            # Update Global State
+            global LATEST_CANDIDATES
+            LATEST_CANDIDATES = current_frame_candidates
             
             # --- EXPLICIT SWITCHING LOGIC ---
             # Requirement: New Score > Current Score + 50 (unless current is lost)
@@ -245,22 +266,16 @@ def video_stream_loop():
             
             # 2. Apply Hysteresis
             if current_target_id is not None and current_target_id in trackable_objects:
-                current_score = 0.0
-                # Find current target's score
-                # We need to re-find it or store it. 
-                # Optimization: We just iterated them. Let's find it in the loop or re-access.
-                # Since we didn't store a map, let's just re-calc or assumes it's in the list? 
-                # Actually, let's just trust 'best_id'.
+                # Find current target's score (Captured in loop above)
+                if current_target_score > 0:
+                     # If best_id is DIFFERENT from current, check the delta.
+                     if best_id is not None and best_id != current_target_id:
+                         if best_score <= (current_target_score + 50.0):
+                             # Challenger is not strong enough. Hold current.
+                             # print(f"Holding ID {current_target_id} (S:{current_target_score:.0f}). Challenger ID {best_id} (S:{best_score:.0f}) didn't exceed by 50.")
+                             best_id = current_target_id 
                 
-                # If best_id is DIFFERENT from current, check the delta.
-                if best_id is not None and best_id != current_target_id:
-                    # We need the score of the current_target_id. To avoid complexity, let's just grab it from a dict next time.
-                    # For now, quick hack: re-calculate? No, costly.
-                    # Better: Store scores in a dict during the loop.
-                    pass 
-                
-            # LET'S REDO THE LOOP STRUCTURE SLIGHTLY TO SUPPORT THIS CLEANLY
-            # (See actual replacement below)
+             # --- END HYSTERESIS ---
             
             # Switch Target logic...
             if best_id is not None:
@@ -271,11 +286,17 @@ def video_stream_loop():
                      visual_tracker = _create_tracker()
                      if visual_tracker:
                          visual_tracker.init(frame, tuple(tgt_box))
+                     visual_tracker = _create_tracker()
+                     if visual_tracker:
+                         visual_tracker.init(frame, tuple(tgt_box))
                 else:
-                    tgt_box = trackable_objects[best_id]['data'][0]
-                    visual_tracker = _create_tracker()
-                    if visual_tracker:
-                        visual_tracker.init(frame, tuple(tgt_box))
+                    # SAME TARGET: Force Re-Sync to DNN box to correct drift
+                    # Only do this if we are not currently blind/moving
+                    if current_time > last_move_end_time:
+                        tgt_box = trackable_objects[best_id]['data'][0]
+                        visual_tracker = _create_tracker()
+                        if visual_tracker:
+                            visual_tracker.init(frame, tuple(tgt_box))
             else:
                 current_target_id = None
                 visual_tracker = None
@@ -300,10 +321,17 @@ def video_stream_loop():
              target_label = obj['data'][1]
              
              if visual_tracker:
-                 ok, bbox = visual_tracker.update(frame)
-                 if ok:
-                     target_box = bbox
-                     detected = True
+                 # CRITICAL: Do NOT run visual tracker if we are "Moving/Settling".
+                 # The camera motion (optical flow) causes KCF to track the background shift.
+                 if current_time < last_move_end_time:
+                     # Blind Mode
+                     detected = False
+                     current_status = "Moving... (Tracking Paused)"
+                 else:
+                     ok, bbox = visual_tracker.update(frame)
+                     if ok:
+                         target_box = bbox
+                         detected = True
              else:
                  target_box = obj['data'][0]
                  detected = True
@@ -355,7 +383,9 @@ def video_stream_loop():
                      if abs(d_yaw) > MIN_MOVE or abs(d_pitch) > MIN_MOVE:
                          duration = 1.0
                          # Log the move verification
-                         print(f"[MOVE] Validated Target ID {current_target_id} ({target_label}). Adjusting Head.")
+                         ts_str = time.strftime("%H:%M:%S", time.localtime(current_time))
+                         ms_str = f"{(current_time % 1):.3f}"[1:]
+                         print(f"[{ts_str}{ms_str}] [MOVE] Validated Target ID {current_target_id} ({target_label}). Adjusting Head.")
                          robot.move_head(d_yaw, d_pitch, duration=duration)
                          last_command_time = current_time
                          
@@ -368,6 +398,14 @@ def video_stream_loop():
                          # Force Rescan: Kill the visual tracker so we don't follow old ghosts.
                          # We often rely on this to be re-initialized by the next fresh DNN result.
                          visual_tracker = None
+                         
+                         # CRITICAL: Reset MOT Tracker
+                         # We are moving the camera. Old centroids are now meaningless ghosts.
+                         # Wipe memory to force fresh acquisition after move.
+                         mot_tracker = SimpleTracker()
+                         trackable_objects = {}
+                         current_target_id = None 
+                         head_recentered = True # Treat as a "reset" of sorts to prevent instant re-centering
         else:
              # Lost or Waiting for Fresh Data
              if not is_fresh_detection and current_target_id is not None:
@@ -392,14 +430,16 @@ def video_stream_loop():
             (ox, oy, ow, oh) = obj['data'][0]
             lbl = obj['data'][1]
             cv2.rectangle(annotated, (int(ox), int(oy)), (int(ox+ow), int(oy+oh)), (100, 100, 100), 1)
-            cv2.putText(annotated, f"ID {obj_id} {lbl}", (int(ox), int(oy)-5), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (100,100,100), 1)
-
+            # Increased Font Size 0.4 -> 0.8
+            cv2.putText(annotated, f"ID {obj_id} {lbl}", (int(ox), int(oy)-5), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (200,200,200), 2)
+ 
         # Draw Target in Green/Orange
         if detected and target_box is not None:
              (tx, ty, tw, th) = target_box
              color = (0, 255, 0) if target_label == "face" else (0, 165, 255) # Green Face, Orange Cat
-             cv2.rectangle(annotated, (int(tx), int(ty)), (int(tx+tw), int(ty+th)), color, 2)
-             cv2.putText(annotated, f"TARGET ID {current_target_id} {target_label}", (int(tx), int(ty)-10), cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
+             cv2.rectangle(annotated, (int(tx), int(ty)), (int(tx+tw), int(ty+th)), color, 3)
+             # Increased Font Size 0.6 -> 1.0
+             cv2.putText(annotated, f"TARGET ID {current_target_id} {target_label}", (int(tx), int(ty)-10), cv2.FONT_HERSHEY_SIMPLEX, 1.0, color, 2)
 
         # MJPEG
         ret, buffer = cv2.imencode('.jpg', annotated, [int(cv2.IMWRITE_JPEG_QUALITY), JPEG_QUALITY])
@@ -430,7 +470,19 @@ def video_feed():
 
 @app.get("/status")
 def get_status():
-    return {"status": current_status}
+    return {
+        "status": current_status,
+        "paused": SERVER_STATE["paused"],
+        "candidates": LATEST_CANDIDATES,
+        "pose": {
+             "head_yaw": robot.current_yaw, # We might need to expose these from robot controller
+             "head_pitch": robot.current_pitch,
+             "head_roll": robot.current_roll,
+             "body_yaw": robot.current_body_yaw,
+             "antenna_left": robot.current_antenna_left,
+             "antenna_right": robot.current_antenna_right
+        }
+    }
 
 @app.post("/api/reset")
 def api_reset():
@@ -451,6 +503,16 @@ class ManualControlRequest(BaseModel):
     body_yaw: float
     antenna_left: float
     antenna_right: float
+
+class MotorModeRequest(BaseModel):
+    mode: str # stiff, limp, soft
+
+@app.post("/api/motor_mode")
+def set_motor_mode(req: MotorModeRequest):
+    if not SERVER_STATE["paused"]:
+        return {"status": "error", "message": "System must be paused."}
+    robot.set_motor_mode(req.mode)
+    return {"status": "ok"}
 
 @app.post("/api/manual_control")
 def manual_control(req: ManualControlRequest):
